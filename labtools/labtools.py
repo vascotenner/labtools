@@ -123,6 +123,13 @@ def myGetQTableWidgetSize(t):
         h += t.rowHeight(i)
     return QtCore.QSize(w, h)
 
+class HeaderAdd():
+    '''Creates a slot that adds a header re-emits the signal'''
+#TODO
+    def __init__(self, capture, cam='cam'):
+        self.punched = QtCore.Signal(object)
+        self.timer = QtCore.QTimer()
+
 class Measurer(QtCore.QObject):
     ''' Represents a punching bag; when you punch it, it
         emits a signal that indicates that it was punched. '''
@@ -140,6 +147,10 @@ class Measurer(QtCore.QObject):
     def start(self, loop=True):
         self.cont = True
         self.loop = loop
+        try:
+            self.cam.arm()
+        except AttributeError:
+            pass
         self.measure()
         
     def measure(self):
@@ -151,6 +162,11 @@ class Measurer(QtCore.QObject):
         self.punched.emit(m)
         if self.loop and self.cont:
             self.timer.singleShot(1,self.measure)
+        if not self.cont:
+            try:
+                self.cam.disarm()
+            except AttributeError:
+                pass
         return m
     
     def stop(self):
@@ -857,3 +873,143 @@ class ShowDifference():
         recent = recent/recent.max()
         different = recent - s.data
         s.imv.setImage(different, autoLevels=True)
+
+
+class AutoExposure():
+    gains = None
+    cam = None
+    count = 0
+    min_counts = 300
+    max_counts = 3400
+    exposure_ratio = 0.7
+
+    def __init__(self, start_exposure_time=None, start_gain=None,
+                 increase_sensitivity=False,
+                 min_exposure_time=None,
+                 max_exposure_time=None):
+        '''Create a measurement function that does auto-exposure.
+        This creates a function that can be used in a stepper.
+
+        When start_* params are None, use the current camera settings as start.
+
+        params:
+        @start_exposure_time -- longest exposuretime to try every frame with
+        @start_gain -- highest gain to start everey frame with
+        @auto_exposure -- function to call to determine the auto exposure
+        @increase_sensitivity -- also increase exposure settings in order to get good picture
+        @min_exoposure_time -- shortest exposure time to use/before switching to higher gain
+        @max_exoposure_time -- longest exposure time to use/before switching to higher gain
+
+        Example:
+        # This has a wait time of 0.5s before each measurement
+        scan = Scan(name='powerscan_{}_{}-{}mW'.format('medium',stepbegin, stepend), steps=steps,
+                body=lambda a,b: step_power(0.5,a,b,
+                        measure=AutoExposure().measure
+               ), estimate=43)
+        '''
+        self.start_exposure_time = start_exposure_time
+        self.start_gain = start_gain
+        self.increase_sensitivity = increase_sensitivity
+        if min_exposure_time is not None:
+            if min_exposure_time <= 100 * lantz.ureg.us:
+                raise ValueError('min_exposure_time should be larger than 100us')
+            self.min_exposure_time = min_exposure_time
+        if max_exposure_time is not None:
+            self.max_exposure_time = max_exposure_time
+
+    def measure(self, emitor=None):
+        '''measure function compatible with labtools'''
+        pass
+
+    def measure_frame(self):
+        '''Measure one frame'''
+        pass
+
+    def adjust(self, measurement):
+        '''Logics to adjust gain and exposure. When good results are found, publish measurement'''
+        pass
+
+    def auto_exposure(self, exposure_time=None, gain=None):  # gain not supoorted
+        '''Find optimal exposure conditions. Read frames until not over/under-exposed
+
+        @exposuretime -- exposure_time of measurement. None means use current setting.
+        @gain -- gain of measurement. None means use current setting.
+        '''
+        # print(exposure_time)
+        if exposure_time is None:
+            exposure_time = self.cam.exposure_time
+        if (self.gains is not None) and (gain is None):
+            gain = self.cam.gain
+            self.cam.gain = gain
+
+        # safely convert to us
+        if lantz.ureg.Quantity == type(exposure_time):
+            exposure_time = exposure_time.to('us').magnitude
+        self.cam.exposure_time = exposure_time * lantz.ureg.us
+
+        measurement = self.measure_frame()
+
+        if self.count > 100:
+            return measurement
+
+        self.count += 1
+        return self.adjust(measurement)
+
+
+class AutoExposure2D(AutoExposure):
+    '''Create auto exposure class for 2D xenics
+
+    Example:
+    # This has a wait time of 0.1s before each measurement
+    auto_exp = AutoExposure2D(increase_sensitivity=True)
+    scan = Scan(name='xenics_powerscan_{}_{}-{}mW'.format('',steps[0], steps[-1]), steps=steps,
+                body=lambda a,b: step_power(0.1,a,b, measure=auto_exp.measure),
+                estimate=43)
+    scan.onfinished = lambda steps: saver(list(frames2)[-len(scan.steps):],
+                    fname='{}_{}.fits'.format(
+                find_available_number(), scan.name))
+    scan.result.connect(update2)
+    scanmanager.append(scan)
+    '''
+    def __init__(self, cam):
+        self.cam = cam
+        self.min_exposure_time = 101 * ureg.us  # should be larger than 100
+        self.max_exposure_time = 10000 * ureg.us
+        self.count = 0
+        self.min_counts = 300
+        self.max_counts = 3400
+
+    def measure(self, emitor=None):
+        '''measure function compatible with labtools'''
+        self.count = 0
+        measurement = self.auto_exposure()
+        global frames2
+        frames2.append(measurement)
+        if emitor:
+            emitor.emit(measurement)
+        return measurement
+
+    def adjust(self, measurement):
+        exposure_time = self.cam.exposure_time
+        # print(exposure_time)
+        # print(measurement.data[:,1:].max())
+        # print('Max', measurement.data.max())
+        if (measurement.data[:, 1:].max() > self.max_counts) \
+                and (exposure_time > self.min_exposure_time):
+            return self.auto_exposure(
+                exposure_time=int(np.round(exposure_time.to('us').magnitude * self.exposure_ratio, decimals=-1)))
+        elif self.increase_sensitivity \
+                and (measurement.data[:, 1:].max() < self.min_counts) \
+                and (exposure_time / self.exposure_ratio < self.max_exposure_time):
+            # print(measurement.data[:,1:].max())
+            return self.auto_exposure(
+                exposure_time=int(np.round(exposure_time.to('us').magnitude / self.exposure_ratio, decimals=-1)))
+        # else:
+        return measurement
+
+    def measure_frame(self):
+        y = capture_frame2()
+        measurement = Measurement(create_header(cam1='cam2'), y)
+        update2(measurement)
+        # meas2.punched.emit(measurement)
+        return measurement
