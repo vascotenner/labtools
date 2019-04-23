@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 import pyqtgraph as pg
+from copy import copy
 
 try:
     import pyfits
@@ -37,10 +38,11 @@ def create_header(cam1='cam'):
     header.update({'time':time.time()})
     return header
 
-def create_cam_header(cam1='cam'):
+def create_cam_header(cam1=None):
     """Create header with information from camera cam"""
     names = ['exposure_time', 'gain', 'OffsetY', 'OffsetX',]
-    cam = globals()[cam1]
+    #cam = globals()[cam1]
+    cam = cam1
     header = {name: cam.__getattribute__(name).__str__() for name in names}
     return header
 
@@ -136,17 +138,18 @@ class Measurer(QtCore.QObject):
     punched = QtCore.Signal(object)
     timer = QtCore.QTimer()
     
-    def __init__(self, capture, cam='cam'):
+    def __init__(self, capture, cam=None):
         # Initialize the PunchingBag as a QObject
         QtCore.QObject.__init__(self)
         self.cont = True
         self.capture = capture
         self.cam = cam
-        self.loop = False
+        #self.loop = False
     
     def start(self, loop=True):
         self.cont = True
-        self.loop = loop
+        #self.loop = loop
+        self.cam.arm()
         try:
             self.cam.arm()
         except AttributeError:
@@ -160,13 +163,14 @@ class Measurer(QtCore.QObject):
         m = Measurement(create_header(cam1=self.cam), y)
         #frames.append(m)
         self.punched.emit(m)
-        if self.loop and self.cont:
-            self.timer.singleShot(1,self.measure)
         if not self.cont:
             try:
                 self.cam.disarm()
             except AttributeError:
                 pass
+        if self.cont: #self.loop and self.cont:
+            self.timer.singleShot(1,self.measure)
+
         return m
     
     def stop(self):
@@ -274,8 +278,16 @@ class ScanCore(QtCore.QObject):
                     else:
                         ret = True
                     self.ready = ret
+                    try:
+                        cam.disarm()
+                    except AttributeError:
+                        pass
 
                 self._internal = internal
+        try:
+            cam.arm()
+        except AttributeError:
+            pass
         self.timer.singleShot(0, internal)
     
     def pause(self):
