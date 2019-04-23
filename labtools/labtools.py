@@ -144,12 +144,9 @@ class Measurer(QtCore.QObject):
         self.cont = True
         self.capture = capture
         self.cam = cam
-        #self.loop = False
     
     def start(self, loop=True):
         self.cont = True
-        #self.loop = loop
-        self.cam.arm()
         try:
             self.cam.arm()
         except AttributeError:
@@ -158,17 +155,15 @@ class Measurer(QtCore.QObject):
         
     def measure(self):
         ''' Punch the bag '''
-        #global frames
         y = self.capture()
         m = Measurement(create_header(cam1=self.cam), y)
-        #frames.append(m)
         self.punched.emit(m)
         if not self.cont:
             try:
                 self.cam.disarm()
             except AttributeError:
                 pass
-        if self.cont: #self.loop and self.cont:
+        if self.cont:
             self.timer.singleShot(1,self.measure)
 
         return m
