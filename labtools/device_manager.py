@@ -118,7 +118,8 @@ class Devices():
         for device in self.config['devices']:
             try:
                 self.devices[device['name']].update(device['shutdown_pre']['feat_settings'])
-            except KeyError:
+            except (KeyError, AttributeError):
+                # attribute error for not initialized devices
                 pass
         lantz.finalize_many(self.devices.values())
 
