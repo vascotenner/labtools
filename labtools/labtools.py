@@ -22,20 +22,39 @@ import collections
 from filename_tools.find_available_filename import find_available_filename, find_available_number
 Slot = QtCore.pyqtSlot
 
+from lantz.ui.widgets import connect_feat, connect_driver
+
 Measurement = collections.namedtuple('Measurement', ['header', 'data'])
 
-def create_header(cam1='cam'):
+def create_header(devices):
     """Get information about settings of xenics linear array and stage and 
     return as dict"""
 
-    header = create_cam_header(cam1=cam1)
+    try:
+        devices
+    except NameError:
+        # 20190507 this is legacy code and should be removed
+        header = create_cam_header(cam1=cam1)
 
-    if 'stage' in globals(): header.update({'position_{}'.format(ax): pos.__str__() for ax,pos in
-                                            enumerate(stage._position_cached)})
-    if 'piezo' in globals():header.update({'piezo': piezo.position})
-    if 'axisz' in globals():header.update({'axisz': axisz.position})
-    if 'delay' in globals():header.update({'delay': delay.position})
-    header.update({'time':time.time()})
+        if 'stage' in globals(): header.update({'position_{}'.format(ax): pos.__str__() for ax,pos in
+                                                enumerate(stage._position_cached)})
+        if 'piezo' in globals():header.update({'piezo': piezo.position})
+        if 'axisz' in globals():header.update({'axisz': axisz.position})
+        if 'delay' in globals():header.update({'delay': delay.position})
+        header.update({'time': time.time()})
+        return header
+
+    header = {}
+    for device_config in devices.config['devices']:
+        try:
+            device = devices.devices[device_config['name']]
+            for headerattr in device_config['headerattrs']:
+                headername = '{}.{}'.format(device_config['name'], headerattr)
+                headervalue = getattr(device, headerattr)
+                header.update({headername: headervalue})
+        except KeyError:
+            pass  # no headers should be added
+    header.update({'time': time.time()})
     return header
 
 def create_cam_header(cam1=None):
@@ -138,11 +157,12 @@ class Measurer(QtCore.QObject):
     punched = QtCore.Signal(object)
     timer = QtCore.QTimer()
     
-    def __init__(self, capture, cam=None):
+    def __init__(self, capture, devices, cam=None):
         # Initialize the PunchingBag as a QObject
         QtCore.QObject.__init__(self)
         self.cont = True
         self.capture = capture
+        self.devices = devices
         self.cam = cam
     
     def start(self, loop=True):
@@ -156,7 +176,7 @@ class Measurer(QtCore.QObject):
     def measure(self):
         ''' Punch the bag '''
         y = self.capture()
-        m = Measurement(create_header(cam1=self.cam), y)
+        m = Measurement(create_header(self.devices), y)
         self.punched.emit(m)
         if not self.cont:
             try:
@@ -397,7 +417,7 @@ class ScanManager(QtCore.QObject):
     qu.queue.put(mes)
     qu.run()
     '''
-    finished = QtCore.Signal(bool)
+    finished = QtCore.Signal(object)
     newitem = QtCore.Signal(object)
     nextitem = QtCore.Signal(object)
 
@@ -452,7 +472,10 @@ class ScanManager(QtCore.QObject):
     def do(self):
         if len(self.scans) > self.counter:
             if self.item:
-                self.item.finished.disconnect()
+                try:
+                    self.item.finished.disconnect()
+                except TypeError:
+                    pass
             self.item = self.scans[self.counter]
             self.counter += 1
             self.item.finished.connect(self.onedone)
@@ -463,14 +486,13 @@ class ScanManager(QtCore.QObject):
                     pass
             try:
                 self.item.start()
-            except RuntimeError:
-                self.item.finished.emit('Already done, skipping:',
-                        self.item.name)
+            except RuntimeError as e:
+                print('Something wrong', e)
         else:
             self.finished.emit(True)
             self.end_time = time.time()
 
-    @Slot(bool)
+    #@Slot(object)
     def onedone(self, done):
         if done or True:
             self.nextitem.emit(done)
@@ -662,7 +684,7 @@ class Cam2_window(QtGui.QWidget, Buttons):
     ''' An example of PySide/PyQt absolute positioning; the main window
         inherits from QWidget, a convenient widget for an empty window. '''
 
-    def __init__(self):
+    def __init__(self, cam):
         # Initialize the object as a QWidget and
         # set its title and minimum width
         QtGui.QWidget.__init__(self)
@@ -682,7 +704,7 @@ class Cam2_window(QtGui.QWidget, Buttons):
               
         # Set the VBox layout as the window's main layout
         self.setLayout(self.layout)
-        
+
         # Add button for ROI
         self.btn_autoROI = QtGui.QPushButton('Set ROI')
         self.button_box.addWidget(self.btn_autoROI)
@@ -690,6 +712,10 @@ class Cam2_window(QtGui.QWidget, Buttons):
         self.fname_box.returnPressed.connect(self.save)
         self.btn_save.clicked.connect(self.save)
         self.btn_autoROI.clicked.connect(self.roi_set_from_view)
+
+        self.cam = cam
+        connect_feat(self.exposure_time, cam, 'exposure_time')
+        connect_feat(self.gain, cam, 'gain')
     
     def save(self):
         text = self.fname_box.text()
@@ -740,9 +766,9 @@ class Cam2_window(QtGui.QWidget, Buttons):
         # These are still relative coordinates.
         view = self.imv.getViewBox()
         coords = view.viewRange()
-        roi = cam2.calc_roi_from_rel_coords(coords[::-1])
-        cam2.set_roi(*roi)
-        view.setRange(xRange=(0,cam2.Width), yRange=(0,cam2.Height))
+        roi = self.cam.calc_roi_from_rel_coords(coords[::-1])
+        self.cam.set_roi(*roi)
+        view.setRange(xRange=(0,self.cam.Width), yRange=(0,self.cam.Height))
 
 class Spectrometer_widget(pg.PlotItem):
     '''Display single line of spectrometer'''
@@ -978,8 +1004,9 @@ class AutoExposure2D(AutoExposure):
     scan.result.connect(update2)
     scanmanager.append(scan)
     '''
-    def __init__(self, cam):
+    def __init__(self, cam, devices):
         self.cam = cam
+        self.devices = devices
         self.min_exposure_time = 101 * ureg.us  # should be larger than 100
         self.max_exposure_time = 10000 * ureg.us
         self.count = 0
@@ -1016,7 +1043,7 @@ class AutoExposure2D(AutoExposure):
 
     def measure_frame(self):
         y = capture_frame2()
-        measurement = Measurement(create_header(cam1='cam2'), y)
+        measurement = Measurement(create_header(self.devices), y)
         update2(measurement)
         # meas2.punched.emit(measurement)
         return measurement

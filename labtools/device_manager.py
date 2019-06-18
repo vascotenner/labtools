@@ -2,7 +2,7 @@ import logging
 import importlib
 import serial.tools.list_ports
 import lantz
-
+from copy import copy
 
 def list_serial_ports():
     devices = serial.tools.list_ports.comports()
@@ -45,6 +45,22 @@ def find_device_VISA(fmt='ASRL{}::INSTR', **kwargs):
         return fmt.format(matched[0].device)
     except IndexError:
         raise ValueError('No device found with ', kwargs)
+
+
+def parse_feat_settings(feat_settings):
+    """Makes pint units from every string starting with unit"""
+    parsed = {}
+    for feat in feat_settings:
+        value = feat_settings[feat]
+        try:
+            if value.startswith('unit'):
+                value = lantz.ureg.parse_expression(value.lstrip('unit '))
+        except AttributeError:
+            # Value is not a string
+            pass
+        print({feat: value})
+        parsed.update({feat: value})
+    return parsed
 
 
 class Devices():
@@ -96,11 +112,12 @@ class Devices():
                 raise TypeError('Error occured while loading {}', device['name'])
 
     def parse_resource_id(self, resource_id_dict):
-        type_ = resource_id_dict.pop('type')
-        if type_ is not 'serial':
+        resource_id_dict_local = copy(resource_id_dict)
+        type_ = resource_id_dict_local.pop('type')
+        if type_ != 'serial':
             raise NotImplementedError('Parsing type {} is not implemented', type_)
 
-        return find_device_VISA(**resource_id_dict)
+        return find_device_VISA(**resource_id_dict_local)
 
     def initialize(self):
         lantz.initialize_many(self.devices.values())
@@ -110,7 +127,8 @@ class Devices():
 
         for device in self.config['devices']:
             try:
-                self.devices[device['name']].update(device['feat_settings'])
+                parsed = parse_feat_settings(device['feat_settings'])
+                self.devices[device['name']].update(parsed)
             except KeyError:
                 pass
 
